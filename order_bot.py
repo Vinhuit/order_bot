@@ -37,12 +37,15 @@ class PollBot:
         self.db = None
         self.config = None
         self.backends = {}
+        self.chatid=None
+        self.msgid=None
+        self.userid=None
 
     def start(self, update, context):
         """Send a message when the command /start is issued."""
         defaults = self.db['defaults']
         default_settings = defaults.find_one(chat=update.message.chat.id)
-
+        
         new_collection = {
             'chat': update.message.chat.id,
             'uuid': str(uuid4()),
@@ -52,17 +55,19 @@ class PollBot:
 
         if default_settings:
             new_collection['settings'] = self.deserialize(default_settings)['settings']
-
-        msg = update.message.reply_text('{}! I will now start collecting your orders! '
-                                        'Send a message that @mentions me and I '
-                                        'will add it to the list.'.format(self.get_affirmation()),
-                                        quote=False)
-
+        
+        msg = update.message.reply_text('{} Pined'.format(update.message.from_user.first_name), quote=False)      
         new_collection['message'] = msg.message_id
         self.store_collection(new_collection)
+        self.chatid = update.message.chat.id
+        self.msgid = msg.message_id
 
     def mention(self, update, context):
+        
+        #self.start(update, context)
+        self.reopen_order(update, context)
         msg = update.message if update.message is not None else update.edited_message
+        
         collection = self.get_collection(msg.chat.id)
 
         order_text = msg.text.replace("@{}".format(self.config['bot_name']), "")
@@ -80,12 +85,14 @@ class PollBot:
                 'order_text': order_text,
             }
             orders.upsert(new_order, ['chat', 'user_id'])
-
+            
             self.update_order_message(context.bot, collection)
+            context.bot.pin_chat_message(self.chatid,self.msgid)
 
         else:
             msg.reply_text("Uh oh - there is no ongoing order in this chat. Please /start me first.")
-
+        
+        #self.close_order(update, context)
     def button(self, update, context):
         query = update.callback_query
         if query.data == 'cancel':
@@ -132,13 +139,14 @@ class PollBot:
 
     def delete(self, update, context):
         collection = self.get_collection(update.message.chat.id)
+        #context.bot.unpin_chat_message(self.chatid,self.msgid)
         if not collection:
             return
         orders = self.db['orders']
 
         orders.delete(collection_uuid=collection['uuid'], user_id=update.message.from_user.id)
 
-        self.update_order_message(context.bot, collection)
+        self.del_order_message(context.bot, collection)
 
     def set_mode(self, update, context):
         arg = self.get_command_arg(update.message.text)
@@ -191,18 +199,18 @@ class PollBot:
 
     def close_order(self, update, context):
         collection = self.get_collection(update.message.chat.id)
-
+       
         if collection is not None:
             collection['active'] = False
             self.store_collection(collection)
-        update.message.reply_text("I closed your ongoing order. You can always /reopen it.")
+        #update.message.reply_text("I closed your ongoing order. You can always /reopen it.")
 
     def reopen_order(self, update, context):
         collection = self.get_collection(update.message.chat.id)
 
         if collection is not None:
             collection['active'] = True
-            update.message.reply_text("I reopened your ongoing order. You can now order stuff again.")
+            #update.message.reply_text("I reopened your ongoing order. You can now order stuff again.")
             self.store_collection(collection)
         else:
             update.message.reply_text("Uh oh, there is no order in this chat that I could reopen.")
@@ -212,7 +220,7 @@ class PollBot:
         if collection is None \
                 or 'active' not in collection \
                 or not collection['active']:
-            update.message.reply_text("Uh oh, looks like there is no ongoing order in this chat. "
+            update.message.reply_text("Uh oh, looks like there is no ongoing bet in this chat. "
                                       "Please /start me first.")
             return
 
@@ -317,9 +325,16 @@ class PollBot:
             message_id=collection['message'],
             parse_mode="markdown"
         )
-
+    def del_order_message(self, bot, collection):
+        bot.edit_message_text(
+            self.del_updated_message(collection),
+            chat_id=collection['chat'],
+            message_id=collection['message'],
+            parse_mode="markdown"
+        )
+  
     def get_updated_message(self, collection):
-        text = "=== Your Orders ==="
+        text = "=== Your Bet ==="
         order_text = ""
 
         table = self.db['orders']
@@ -339,6 +354,33 @@ class PollBot:
         text += self.get_backend(collection).get_orders_as_string(collection, orders)
 
         return text
+    def del_updated_message(self, collection):
+        text = "=== Your Bet ==="
+        order_text = ""
+
+        table = self.db['orders']
+        orders = table.find(collection_uuid=collection['uuid'])
+        orders = list(orders)
+
+        for order in orders:
+            
+            if self.userid == order['user_name']:
+              order_text += "\n*{}*: {}\n".format(order['user_name'], " ")
+            else:
+              order_text += "\n*{}*: {}\n".format(order['user_name'], order['order_text'])
+            
+
+        text += order_text
+        text.strip()
+        if not order_text:
+            text += "\nThere are currently no orders."
+            return text
+
+        text += "\n"
+        text += self.get_backend(collection).get_orders_as_string(collection, orders)
+
+        return text
+
 
     @staticmethod
     def get_affirmation():

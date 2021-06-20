@@ -9,7 +9,7 @@ import json
 
 from uuid import uuid4
 
-from telegram import TelegramError, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import TelegramError, InlineKeyboardButton, InlineKeyboardMarkup 
 from telegram.ext import Updater, CommandHandler, CallbackQueryHandler, MessageHandler
 from mentions_handler import MentionFilter
 from dominos import Dominos
@@ -40,6 +40,7 @@ class PollBot:
         self.chatid=None
         self.msgid=None
         self.userid=None
+        self.pretext=""
 
     def start(self, update, context):
         """Send a message when the command /start is issued."""
@@ -52,29 +53,62 @@ class PollBot:
             'active': True,
             'settings': {}
         }
-
+        
         if default_settings:
             new_collection['settings'] = self.deserialize(default_settings)['settings']
         
-        msg = update.message.reply_text('{} Pined'.format(update.message.from_user.first_name), quote=False)      
+        msg = update.message.reply_text('{} Pined'.format(update.message.from_user.first_name), quote=False)
+        self.chatid = update.message.chat.id
+        self.msgid = msg.message_id      
         new_collection['message'] = msg.message_id
         self.store_collection(new_collection)
-        self.chatid = update.message.chat.id
-        self.msgid = msg.message_id
+        
 
     def mention(self, update, context):
         
         #self.start(update, context)
-        self.reopen_order(update, context)
+        #self.reopen_order(update, context)
         msg = update.message if update.message is not None else update.edited_message
-        
+        table = self.db['orders']
         collection = self.get_collection(msg.chat.id)
-
+       
+        orders = table.find(collection_uuid=collection['uuid'])
+        orders = list(orders)
+        message_user = " "
+        user =update.message.from_user.first_name
+        
         order_text = msg.text.replace("@{}".format(self.config['bot_name']), "")
+        order_text = order_text.replace("/bet", "")
         if len(order_text) > 400:
             order_text = order_text[:400] + "..."
         order_text = re.sub(r'\n\s*', "\n", order_text)
         order_text.strip()
+        order_pre = order_text.strip()
+        for order in orders:
+          print("-----------{}----------".format(update.message.from_user.first_name))
+          print(orders)
+          print("--------{}-------------".format(order   ['user_name']))
+          if update.message.from_user.first_name == order['user_name']:
+              if len(order['order_pre']) > 400:
+                if self.pretext != 'del':
+                  self.pretext = order['order_pre'][:400] + "..."
+                  order_pre = order['order_pre'][:400] + "..." + "\n"+ order_text
+                else:
+                  order_pre = ""
+                  self.pretext = ""
+                break
+              else:
+                if self.pretext != 'del':
+                  order_pre =  order['order_pre'] +"\n"+ order_text
+                else:
+                  order_pre = ""
+                  self.pretext = ""
+                break
+          else:
+              self.pretext =""
+              continue
+
+        
         if collection is not None and collection['active']:
             orders = self.db['orders']
             new_order = {
@@ -83,9 +117,10 @@ class PollBot:
                 'user_id': msg.from_user.id,
                 'user_name': msg.from_user.first_name,
                 'order_text': order_text,
+                'order_pre': order_pre,
             }
             orders.upsert(new_order, ['chat', 'user_id'])
-            
+            self.userid = update.message.from_user.first_name
             self.update_order_message(context.bot, collection)
             context.bot.pin_chat_message(self.chatid,self.msgid)
 
@@ -139,13 +174,22 @@ class PollBot:
 
     def delete(self, update, context):
         collection = self.get_collection(update.message.chat.id)
+        self.userid = update.message.from_user.first_name
         #context.bot.unpin_chat_message(self.chatid,self.msgid)
         if not collection:
             return
         orders = self.db['orders']
 
-        orders.delete(collection_uuid=collection['uuid'], user_id=update.message.from_user.id)
+        orders.delete(collection_uuid=collection['uuid'], user_name=update.message.from_user.first_name)
+        
+        orders = orders.find(collection_uuid=collection['uuid'])
+        orders = list(orders)
 
+        for order in orders:
+          if update.message.from_user.first_name == order['user_name']:
+            order['order_pre'] = ""
+            self.pretext = "del"
+        
         self.del_order_message(context.bot, collection)
 
     def set_mode(self, update, context):
@@ -320,7 +364,7 @@ class PollBot:
 
     def update_order_message(self, bot, collection):
         bot.edit_message_text(
-            self.get_updated_message(collection),
+            self.get_updated_message(bot,collection),
             chat_id=collection['chat'],
             message_id=collection['message'],
             parse_mode="markdown"
@@ -333,16 +377,19 @@ class PollBot:
             parse_mode="markdown"
         )
   
-    def get_updated_message(self, collection):
+    def get_updated_message(self, bot,collection):
         text = "=== Your Bet ==="
         order_text = ""
 
         table = self.db['orders']
+       
         orders = table.find(collection_uuid=collection['uuid'])
         orders = list(orders)
-
+        message_user = " "
+        
         for order in orders:
-            order_text += "\n*{}*: {}\n".format(order['user_name'], order['order_text'][:403])
+              order_text += "\n*{}*: {}\n".format(order['user_name'],  order['order_pre'][:403] )
+         
 
         text += order_text
         text.strip()
@@ -363,12 +410,15 @@ class PollBot:
         orders = list(orders)
 
         for order in orders:
-            
             if self.userid == order['user_name']:
-              order_text += "\n*{}*: {}\n".format(order['user_name'], " ")
+              order_text += "\n*{}*: {}\n".format(order['user_name'], " ")              
             else:
               order_text += "\n*{}*: {}\n".format(order['user_name'], order['order_text'])
-            
+        for order in orders:
+          if self.userid == order['user_name']:
+            self.pretext = ""
+            break
+
 
         text += order_text
         text.strip()
@@ -441,6 +491,8 @@ class PollBot:
         # General commands
         # dp.add_handler(MentionsHandler(self.config['bot_name'], self.mention, edited_updates=True))
         dp.add_handler(MessageHandler(MentionFilter(self.config['bot_name']), self.mention, edited_updates=True))
+        
+        dp.add_handler(CommandHandler("bet", self.mention))
         dp.add_handler(CommandHandler("help", self.send_help))
         dp.add_handler(CommandHandler("start", self.start))
 
